@@ -616,6 +616,22 @@ fn subclass_event_target_window<T>(
     }
 }
 
+fn remove_event_target_window_subclass<T>(
+    window: HWND,
+    subclass_input: Box<ThreadMsgTargetSubclassInput<T>>,
+) {
+    subclass_input.event_loop_runner.catch_unwind(|| {
+        let removal_result = unsafe {
+            commctrl::RemoveWindowSubclass(
+                window,
+                Some(thread_event_target_callback::<T>),
+                THREAD_EVENT_TARGET_SUBCLASS_ID,
+            )
+        };
+        assert_eq!(removal_result, 1);
+    });
+}
+
 /// Capture mouse input, allowing `window` to receive mouse events when the cursor is outside of
 /// the window.
 unsafe fn capture_mouse(window: HWND, window_state: &mut WindowState) {
@@ -646,6 +662,19 @@ pub(crate) fn subclass_window<T>(window: HWND, subclass_input: SubclassInput<T>)
         )
     };
     assert_eq!(subclass_result, 1);
+}
+
+fn remove_window_subclass<T>(window: HWND, subclass_input: Box<SubclassInput<T>>) {
+    subclass_input.event_loop_runner.catch_unwind(|| {
+        let removal_result = unsafe {
+            commctrl::RemoveWindowSubclass(
+                window,
+                Some(public_window_callback::<T>),
+                WINDOW_SUBCLASS_ID,
+            )
+        };
+        assert_eq!(removal_result, 1);
+    });
 }
 
 fn normalize_pointer_pressure(pressure: u32) -> Option<Force> {
@@ -753,7 +782,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
     _: UINT_PTR,
     subclass_input_ptr: DWORD_PTR,
 ) -> LRESULT {
-    let subclass_input = &*(subclass_input_ptr as *const SubclassInput<T>);
+    let subclass_input = Box::from_raw(subclass_input_ptr as *mut SubclassInput<T>);
 
     winuser::RedrawWindow(
         subclass_input.event_loop_runner.thread_msg_target(),
@@ -761,6 +790,8 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
         ptr::null_mut(),
         winuser::RDW_INTERNALPAINT,
     );
+
+    let mut ncdestroy = false;
 
     // I decided to bind the closure to `callback` and pass it to catch_unwind rather than passing
     // the closure to catch_unwind directly so that the match body indendation wouldn't change and
@@ -814,8 +845,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
         }
 
         winuser::WM_NCDESTROY => {
-            drop(subclass_input);
-            Box::from_raw(subclass_input_ptr as *mut SubclassInput<T>);
+            ncdestroy = true;
             0
         }
 
@@ -1032,7 +1062,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
                 w.mouse.last_position = Some(position);
             }
             if cursor_moved {
-                update_modifiers(window, subclass_input);
+                update_modifiers(window, &subclass_input);
 
                 subclass_input.send_event(Event::WindowEvent {
                     window_id: RootWindowId(WindowId(window)),
@@ -1073,7 +1103,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
             let value = value as i32;
             let value = value as f32 / winuser::WHEEL_DELTA as f32;
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1095,7 +1125,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
             let value = value as i32;
             let value = value as f32 / winuser::WHEEL_DELTA as f32;
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1116,7 +1146,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
                 commctrl::DefSubclassProc(window, msg, wparam, lparam)
             } else {
                 if let Some((scancode, vkey)) = process_key_params(wparam, lparam) {
-                    update_modifiers(window, subclass_input);
+                    update_modifiers(window, &subclass_input);
 
                     #[allow(deprecated)]
                     subclass_input.send_event(Event::WindowEvent {
@@ -1148,7 +1178,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
         winuser::WM_KEYUP | winuser::WM_SYSKEYUP => {
             use crate::event::ElementState::Released;
             if let Some((scancode, vkey)) = process_key_params(wparam, lparam) {
-                update_modifiers(window, subclass_input);
+                update_modifiers(window, &subclass_input);
 
                 #[allow(deprecated)]
                 subclass_input.send_event(Event::WindowEvent {
@@ -1173,7 +1203,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             capture_mouse(window, &mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1194,7 +1224,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             release_mouse(&mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1215,7 +1245,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             capture_mouse(window, &mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1236,7 +1266,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             release_mouse(&mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1257,7 +1287,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             capture_mouse(window, &mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1278,7 +1308,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             release_mouse(&mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1300,7 +1330,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             capture_mouse(window, &mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1322,7 +1352,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
 
             release_mouse(&mut *subclass_input.window_state.lock());
 
-            update_modifiers(window, subclass_input);
+            update_modifiers(window, &subclass_input);
 
             subclass_input.send_event(Event::WindowEvent {
                 window_id: RootWindowId(WindowId(window)),
@@ -1532,7 +1562,7 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
                     winuser::MapVirtualKeyA(windows_keycode as _, winuser::MAPVK_VK_TO_VSC);
                 let virtual_keycode = event::vkey_to_winit_vkey(windows_keycode);
 
-                update_modifiers(window, subclass_input);
+                update_modifiers(window, &subclass_input);
 
                 #[allow(deprecated)]
                 subclass_input.send_event(Event::WindowEvent {
@@ -1909,10 +1939,16 @@ unsafe extern "system" fn public_window_callback<T: 'static>(
         }
     };
 
-    subclass_input
+    let result = subclass_input
         .event_loop_runner
         .catch_unwind(callback)
-        .unwrap_or(-1)
+        .unwrap_or(-1);
+    if ncdestroy {
+        remove_window_subclass(window, subclass_input);
+    } else {
+        Box::into_raw(subclass_input);
+    }
+    result
 }
 
 unsafe extern "system" fn thread_event_target_callback<T: 'static>(
@@ -1923,8 +1959,7 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
     _: UINT_PTR,
     subclass_input_ptr: DWORD_PTR,
 ) -> LRESULT {
-    let subclass_input = &mut *(subclass_input_ptr as *mut ThreadMsgTargetSubclassInput<T>);
-    let runner = subclass_input.event_loop_runner.clone();
+    let subclass_input = Box::from_raw(subclass_input_ptr as *mut ThreadMsgTargetSubclassInput<T>);
 
     if msg != winuser::WM_PAINT {
         winuser::RedrawWindow(
@@ -1935,13 +1970,14 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
         );
     }
 
+    let mut ncdestroy = false;
+
     // I decided to bind the closure to `callback` and pass it to catch_unwind rather than passing
     // the closure to catch_unwind directly so that the match body indendation wouldn't change and
     // the git blame and history would be preserved.
     let callback = || match msg {
         winuser::WM_NCDESTROY => {
-            Box::from_raw(subclass_input);
-            drop(subclass_input);
+            ncdestroy = true;
             0
         }
         // Because WM_PAINT comes after all other messages, we use it during modal loops to detect
@@ -2148,5 +2184,14 @@ unsafe extern "system" fn thread_event_target_callback<T: 'static>(
         _ => commctrl::DefSubclassProc(window, msg, wparam, lparam),
     };
 
-    runner.catch_unwind(callback).unwrap_or(-1)
+    let result = subclass_input
+        .event_loop_runner
+        .catch_unwind(callback)
+        .unwrap_or(-1);
+    if ncdestroy {
+        remove_event_target_window_subclass(window, subclass_input);
+    } else {
+        Box::into_raw(subclass_input);
+    }
+    result
 }
